@@ -3,7 +3,7 @@
 \docType{data}
 \name{prepped_recipe}
 \alias{prepped_recipe}
-\title{A prepped tidymodels recipe for the sylalble classifier model}
+\title{A prepped tidymodels recipe for the syllable classifier model}
 \format{
 An object of class \code{recipe} of length 10.
 }
@@ -11,6 +11,6 @@ An object of class \code{recipe} of length 10.
 prepped_recipe
 }
 \description{
-A prepped tidymodels recipe for the sylalble classifier model
+A prepped tidymodels recipe for the syllable classifier model
 }
 \keyword{datasets}
