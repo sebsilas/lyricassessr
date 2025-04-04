@@ -1,0 +1,545 @@
+
+
+
+```{r warning = FALSE, message = FALSE}
+
+library(tidyverse)
+library(tidymodels)
+library(xgboost)
+
+vowel_metadata <- read_csv('vowel_metadata.csv')
+
+```
+
+
+```{r}
+
+theme_set(theme_minimal())
+
+```
+
+```{r}
+
+# empty_tb <- as.list(rep(NA, 60)) %>% 
+#   tibble::as_tibble(.name_repair = "unique") %>% 
+#   setNames(names(vowel_audio_features))
+
+```
+
+
+```{r}
+
+vowel_audio_features <- vowel_metadata$audio_file_path %>% 
+  map_dfr(function(f) {
+    tryCatch({
+      musicassessr::extract_audio_features(f)
+    }, error = function(err) {
+      logging::logerror(err)
+      tibble::tibble(file_key = NA, V1_mean = NA, V1_sd = NA, V2_mean = NA, 
+    V2_sd = NA, V3_mean = NA, V3_sd = NA, V4_mean = NA, V4_sd = NA, 
+    V5_mean = NA, V5_sd = NA, V6_mean = NA, V6_sd = NA, V7_mean = NA, 
+    V7_sd = NA, V8_mean = NA, V8_sd = NA, V9_mean = NA, V9_sd = NA, 
+    V10_mean = NA, V10_sd = NA, V11_mean = NA, V11_sd = NA, V12_mean = NA, 
+    V12_sd = NA, mean = NA, sd = NA, median = NA, sem = NA, mode = NA, 
+    Q25 = NA, Q75 = NA, IQR = NA, cent = NA, skewness = NA, kurtosis = NA, 
+    sfm = NA, sh = NA, prec = NA, duration = NA, sample_rate = NA, 
+    bit_depth = NA, rms = NA, zero_crossing_rate = NA, shannon_entropy = NA, 
+    acoustic_complexity_index = NA, acoustic_diversity_index = NA, 
+    acoustic_diversity_index2 = NA, acoustic_diversity_index3 = NA, 
+    acoustic_entropy_index = NA, acoustic_evenness_index = NA, 
+    bioacoustic_index = NA, frequency_peaks_number = NA, amplitude_index = NA, 
+    normalized_difference_soundscape_index = NA, spectral_entropy_ndsi = NA, 
+    spectral_entropy_anthrophony = NA, spectral_entropy_biophony = NA, 
+    spectral_entropy2 = NA, temporal_entropy = NA)
+    })
+  }, .progress = TRUE)
+
+
+vowel_metadata_with_audio_features <- vowel_metadata %>% 
+  cbind(vowel_audio_features)
+
+write_csv(vowel_metadata_with_audio_features, 'vowel_metadata_with_audio_features.csv')
+
+```
+
+
+
+```{r warning = FALSE, message = FALSE}
+
+vowel_metadata_with_audio_features <- read_csv('vowel_metadata_with_audio_features.csv')
+
+```
+
+CHECK NAS...
+
+```{r}
+
+vowel_metadata_with_audio_features <- vowel_metadata_with_audio_features %>% 
+  select(syllable, `pitch(Hz)`, voice, V1_mean:temporal_entropy) %>% 
+  mutate(syllable = as.factor(syllable)) %>% 
+  janitor::remove_empty(which = 'cols')
+
+```
+
+
+```{r}
+
+vowel_metadata %>% 
+  ggplot(aes(x = syllable, y = `pitch(Hz)`, fill = syllable)) +
+    geom_boxplot()
+
+```
+
+
+
+```{r}
+
+syllable_counts <- vowel_metadata_with_audio_features %>% 
+  count(syllable)
+
+syllable_counts
+
+syllable_by_voice_counts <- vowel_metadata_with_audio_features %>% 
+  count(syllable, voice)
+
+```
+
+
+
+```{r}
+
+syllable_by_voice_counts %>% 
+  summarise(
+    Doo = sum(n[syllable=="Doo"]),
+    Lah = sum(n[syllable=="Lah"]), 
+    Woh = sum(n[syllable=="Woh"]),
+    A = sum(n[syllable=="A"], n[syllable=="Ah"]),
+    E = sum(n[syllable=="E"], n[syllable=="Eh"]),
+    I = sum(n[syllable=="I"], n[syllable=="Ih"]),
+    O = sum(n[syllable=="O"], n[syllable=="Oh"]),
+    U = sum(n[syllable=="U"], n[syllable=="Uh"])
+            ) %>% 
+  ungroup()
+
+
+```
+
+```{r}
+
+new_range <- 
+  vowel_metadata_with_audio_features %>% 
+    group_by(syllable) %>% 
+    summarise(highest = max(`pitch(Hz)`),
+              lowest = min(`pitch(Hz)`)) %>% 
+    ungroup() %>% 
+    # Derive new range that fits all syllables:
+    summarise(
+      top_range = min(highest),
+      bottom_range = max(lowest),
+    )
+
+```
+
+
+```{r}
+
+vowel_metadata_with_audio_features_range_restricted <- vowel_metadata_with_audio_features %>% 
+  filter(dplyr::between(`pitch(Hz)`, new_range$bottom_range, new_range$top_range))
+```
+
+
+```{r}
+
+
+vowel_metadata_with_audio_features_range_restricted %>% 
+  ggplot(aes(x = syllable, y = `pitch(Hz)`, fill = syllable)) +
+    geom_boxplot()
+
+```
+
+
+```{r}
+
+
+syllable_by_voice_counts_range_restricted <- vowel_metadata_with_audio_features_range_restricted %>% 
+  count(syllable, voice)
+
+```
+
+
+
+```{r}
+
+syllable_by_voice_counts_range_restricted %>% 
+  summarise(
+    Doo = sum(n[syllable=="Doo"]),
+    Lah = sum(n[syllable=="Lah"]), 
+    Woh = sum(n[syllable=="Woh"]),
+    A = sum(n[syllable=="A"], n[syllable=="Ah"]),
+    E = sum(n[syllable=="E"], n[syllable=="Eh"]),
+    I = sum(n[syllable=="I"], n[syllable=="Ih"]),
+    O = sum(n[syllable=="O"], n[syllable=="Oh"]),
+    U = sum(n[syllable=="U"], n[syllable=="Uh"])
+            ) %>% 
+  ungroup()
+
+```
+
+The AEIOU sounds don't have melffcs for some freqs
+
+```{r}
+
+vowel_metadata_with_audio_features_range_restricted_without_AEIOU <- 
+  vowel_metadata_with_audio_features_range_restricted %>% 
+  filter(!syllable %in% c("A", "E", "I", "O", "U")) %>% 
+  mutate(syllable = as.factor(as.character(syllable)))
+  
+
+```
+
+
+```{r}
+
+syllable_counts_range_restricted_without_AEIOU <- vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>%
+  count(syllable)
+
+
+syllable_counts_range_restricted_without_AEIOU
+
+```
+
+```{r}
+
+
+vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>% 
+  ggplot(aes(x = syllable, y = `pitch(Hz)`, fill = syllable)) +
+    geom_boxplot()
+
+```
+
+
+```{r}
+
+vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>% 
+  summarise(min_pitch = min(`pitch(Hz)`),
+            max_pitch = max(`pitch(Hz)`),
+            lowest_midi_note = hrep::freq_to_midi(min_pitch),
+            highest_midi_note = hrep::freq_to_midi(max_pitch),
+            lowest_sci_notation = itembankr::midi_to_sci_notation(round(lowest_midi_note)),
+            highest_sci_notation = itembankr::midi_to_sci_notation(round(highest_midi_note))
+            )
+
+```
+
+
+
+```{r}
+
+# Fix the random numbers by setting the seed 
+# This enables the analysis to be reproducible 
+set.seed(123)
+
+
+# Put 3/4 of the data into the training set 
+data_split <- vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>% 
+  select(-c(duration, sample_rate, bit_depth, voice, `pitch(Hz)`) ) %>% 
+  initial_split(prop = 3/4, strata = "syllable")
+
+# Create dataframes for the two sets:
+train_data <- training(data_split) 
+test_data <- testing(data_split)
+
+```
+
+
+```{r}
+
+xgb_spec <- 
+  boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") %>%
+  set_args(learn_rate = tune::tune() )
+
+```
+
+
+```{r}
+
+
+rec <- train_data %>% 
+  # dplyr::mutate(dplyr::across(c(Payment, CPI, CompletionPercentage, SurveyMobileConversion, 
+  #                               TotalRemaining, MemberSinceDays, Age, Conversion), log_sort)) %>% 
+  recipe(syllable ~ ., data = .) %>%
+  step_zv(all_numeric(), -all_outcomes()) %>%
+  step_novel(all_nominal(), -all_outcomes()) %>%
+  #step_naomit(everything(), skip = TRUE) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_corr(all_predictors(), threshold = 0.7, method = "spearman") 
+
+
+prepped_recipe <- prep(rec)
+
+
+xgb_wflow <-
+  workflow() %>%
+  add_recipe(rec) %>% 
+  add_model(xgb_spec)
+
+```
+
+
+
+```{r}
+
+cv_folds <-
+  vfold_cv(train_data, 
+           v = 5)
+
+# Define search grid for hyperparameter tuning for xgboost
+# In my (JP) experience, the results are only sensitive to 
+# the value (magnitude really) of `learn_rate`, robust to everything else.
+xgb_grid <- dials::grid_regular(levels=5, 
+                                dials::learn_rate(range = c(-5,-1),
+                                                  trans = scales::log10_trans() )
+                                )
+
+metrics <-  metric_set(
+      recall, precision, f_meas, 
+      accuracy, kap, specificity,
+      roc_auc, sens, spec)
+
+
+
+```
+
+
+
+```{r xgb_tuning}
+
+xgb_tuning_results <- tune::tune_grid(
+  object = xgb_wflow, 
+  resamples = cv_folds,
+  grid = xgb_grid,
+  controls  = tune::control_grid(),
+  metrics = metrics )
+
+```
+
+
+
+```{r xgb_metrics}
+
+xgb_tuning_metrics <- tune::collect_metrics(xgb_tuning_results)
+
+```
+
+
+
+```{r best true positive}
+
+best_xgb <- tune::show_best(xgb_tuning_results, metric="roc_auc",n=1)
+
+```
+
+```{r plot the results}
+
+xgb_tuning_metrics %>% 
+  dplyr::filter(.metric %in% c("accuracy", "precision", "recall")) %>%
+  ggplot2::ggplot( ggplot2::aes(x=learn_rate,y=mean)) +
+  ggplot2::geom_point() +
+  ggplot2::facet_wrap(~.metric)
+
+```
+
+```{r do test fit}
+
+test_xgb_wf <- workflow() %>%
+  add_recipe(rec) %>% 
+  add_model(
+  boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") %>%
+    set_args(learn_rate = 0.1)
+    )
+
+
+test_fit <- tune::last_fit(object=test_xgb_wf, 
+                           split=data_split, 
+                           preprocessor=best_xgb, 
+                           metrics = metrics) 
+```
+
+
+```{r extract test fit details}
+
+test_fit_metrics <- test_fit$.metrics[[1]]
+test_fit_predictions <- test_fit$.predictions[[1]]
+
+```
+
+
+```{r}
+
+tt2 <- test_data %>% 
+  mutate(prediction = test_fit_predictions$.pred_class) %>% 
+  select(syllable, prediction) %>% 
+  mutate(correct = syllable == prediction)
+
+
+accuracy_by_syllable <- 
+  tt2 %>% 
+    select(syllable, correct) %>% 
+    group_by(syllable) %>% 
+    summarise(accuracy = sum(correct) / n() ) %>% 
+    ungroup() %>% 
+    arrange(desc(accuracy)) %>% 
+    left_join(syllable_counts, by = "syllable")
+
+```
+
+
+```{r}
+
+cor(accuracy_by_syllable$accuracy, accuracy_by_syllable$n)
+
+```
+
+
+
+<!-- 
+```{r check true positive rate}
+
+finished <- test_fit_predictions %>% 
+  dplyr::filter(Finished == 1)
+
+true_positives <- test_fit_predictions %>%
+  dplyr::filter(.pred_class == 1 & Finished == 1)
+
+all_positives <- test_fit_predictions %>%
+  dplyr::filter(.pred_class == 1)
+
+nrow(true_positives)/nrow(all_positives)
+
+
+```
+-->
+
+
+```{r}
+
+best_xgb_mod <- select_best(xgb_tuning_results, metric = "roc_auc")
+
+xgb_final_workflow <-
+  xgb_wflow %>%
+  tune::finalize_workflow(best_xgb_mod)
+
+```
+
+```{r}
+
+fit_final_workflow <- fit(xgb_final_workflow, vowel_metadata_with_audio_features_range_restricted_without_AEIOU)
+
+```
+
+
+```{r}
+
+vowel_metadata_with_audio_features_range_restricted_without_AEIOU <- vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>% 
+  dplyr::mutate(prediction = predict(fit_final_workflow, 
+                                     new_data = vowel_metadata_with_audio_features_range_restricted_without_AEIOU)$.pred_class)
+
+                
+
+tt <- vowel_metadata_with_audio_features_range_restricted_without_AEIOU %>% 
+  dplyr::select(syllable, prediction) %>% 
+  mutate(correct = syllable == prediction)
+
+```
+
+```{r}
+
+sum(tt$correct)/nrow(tt)
+
+```
+
+
+```{r}
+
+vip::vip(fit_final_workflow, num_features = 100L)
+
+```
+
+```{r}
+
+fit_final_workflow_bundle <- bundle::bundle(fit_final_workflow)
+
+save(fit_final_workflow_bundle, file = "syllable_classifier_bundle.rda")
+
+```
+
+
+```{r}
+
+syllable_classifier_bundle <- fit_final_workflow_bundle
+
+use_data(syllable_classifier_bundle, 
+         prepped_recipe,
+         vowel_metadata_with_audio_features_range_restricted_without_AEIOU, overwrite = TRUE)
+
+```
+
+
+Shapley analysis
+
+```{r}
+
+library(shapviz)
+library(tidymodels)
+
+syllable_mod <- bundle::unbundle(lyricassessr::syllable_classifier_bundle)
+audio_features <- bundle::unbundle(lyricassessr::vowel_metadata_with_audio_features_range_restricted_without_AEIOU)
+
+xgb_model <- parsnip::extract_fit_engine(syllable_mod)
+
+audio_features_prepped <- recipes::bake(
+  lyricassessr::prepped_recipe,
+  recipes::has_role("predictor"),
+  new_data = audio_features
+  ) %>% slice(1)
+
+shap_values_baseline <- shapviz(xgb_model, X_pred = as.matrix(audio_features_prepped))
+
+names(shap_values) <- levels(audio_features$syllable)
+
+sv_importance(shap_values)
+
+```
+
+
+```{r}
+
+use_data(shap_values_baseline)
+
+```
+
+
+```{r}
+
+audio_features_summarised <- 
+  audio_features %>% 
+    summarise(across(where(is.numeric), ~ round(mean(.x, na.rm = TRUE), 2))) %>% 
+    select(all_of(names(audio_features_prepped)))
+
+
+audio_features_summarised_by_syllable <- 
+  audio_features %>% 
+    group_by(syllable) %>% 
+    summarise(across(where(is.numeric), ~ round( mean(.x, na.rm = TRUE), 2))) %>% 
+    select(syllable, all_of(names(audio_features_prepped))) %>% 
+    ungroup()
+
+
+use_data(audio_features_summarised, audio_features_summarised_by_syllable)
+
+```

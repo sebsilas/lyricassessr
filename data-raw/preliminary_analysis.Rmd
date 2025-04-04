@@ -1,0 +1,272 @@
+
+
+```{r, message = FALSE, warning = FALSE}
+
+library(tidyverse)
+library(purrr)
+
+```
+
+
+Create metadata dataframe
+
+```{r}
+
+vowel_metadata <- list.files('~/lyricassessr/data-raw/Vocals', 
+                       recursive = TRUE, 
+                       pattern = "\\.xlsx$",
+                       full.names = TRUE) %>% 
+  map_dfr(function(f) {
+    readxl::read_excel(f) %>% 
+      rename_with(~str_remove_all(.x, " "))
+  }) %>% 
+  dplyr::mutate(file_name2 = file_name) %>% 
+  tidyr::separate(file_name2, into = c("voice", "syllable", "id"), sep = "_") %>% 
+  mutate(audio_file = paste0(file_name, ".wav"),
+         audio_file_path = paste0("Vocals/", voice, "/", syllable, "/", audio_file)
+         )
+
+
+write_csv(vowel_metadata, 'vowel_metadata.csv')
+
+```
+
+
+```{r warning = FALSE, message = FALSE}
+
+vowel_metadata <- read_csv('vowel_metadata.csv')
+
+```
+
+
+
+Test getting lyrics
+
+```{r}
+
+t <- get_lyrics(vowel_metadata[[932, "audio_file_path"]])
+
+```
+
+```{r}
+
+
+t <- get_lyrics("seb_HBD.m4a")
+
+```
+
+
+```{r}
+
+# Sometimes get_lyrics hangs, so we store results as a backup
+results_list <- vector("list", nrow(vowel_metadata))
+
+```
+
+
+```{r}
+
+# Commented out to make sure I don't run it again, but it works
+
+
+# vowel_metadata <- vowel_metadata %>% 
+#   rowwise() %>% 
+#   mutate(transcription = tryCatch({
+#       res <- get_lyrics(audio_file_path)
+#       # Store result in the results_list
+#       results_list[[row_number()]] <<- res
+#       res
+#     }, error = function(e) {
+#       logging::logerror(e)
+#       # Handle error, store NA or an error message
+#       results_list[[dplyr::row_number()]] <<- NA
+#       NA
+#     }) ) %>% 
+#   ungroup()
+
+write_csv(vowel_metadata, 'vowel_metadata_with_transcription.csv')
+
+# vowel_metadata[[191, "audio_file_path"]]
+
+```
+
+
+
+```{r}
+
+vowel_metadata <- read_csv('vowel_metadata_with_transcription.csv')
+
+```
+
+```{r}
+
+edit_dist <- function(str1, str2) {
+  adist(str1, str2)[[1]]
+}
+
+```
+
+
+```{r}
+
+vowel_metadata <- vowel_metadata %>% 
+  mutate(transcription_clean = tolower(gsub("[^a-zA-Z ]", "", transcription)),
+         syllable = tolower(trimws(syllable))) %>% 
+  rowwise() %>% 
+  mutate(edit_distance = case_when(transcription_clean == "" ~ 500,
+                                   TRUE ~ edit_dist(syllable, transcription_clean)),
+         first_char_transcription = substr(transcription_clean, 1, 1),
+         first_char_syllable = substr(syllable, 1, 1),
+         is_first_char_same = first_char_transcription == first_char_syllable
+         ) %>% 
+    ungroup()
+
+```
+
+
+```{r}
+
+vowel_metadata %>% 
+  filter(`pitch(Hz)` != 466164.0000) %>% # Mistake in data
+  filter(transcription_clean != "") %>%
+  #filter(edit_distance < 10) %>% 
+  ggplot(aes(x = `pitch(Hz)`, y = edit_distance)) +
+    geom_point() +
+    theme_minimal() +
+    labs(x = "Pitch (Hz)",
+         y = "Edit Distance") +
+    facet_wrap(~syllable) +
+    geom_smooth()
+
+```
+
+
+```{r}
+
+vowel_metadata %>% 
+  filter(`pitch(Hz)` != 466164.0000) %>% # Mistake in data
+  filter(transcription_clean != "") %>%
+  #filter(edit_distance < 10) %>% 
+  ggplot(aes(x = `pitch(Hz)`, y = edit_distance)) +
+    geom_point() +
+    theme_minimal() +
+    labs(x = "Pitch (Hz)",
+         y = "Edit Distance") +
+    geom_smooth()
+
+```
+
+
+```{r}
+
+vowel_metadata %>% 
+  ggplot(aes(x = reorder(syllable, edit_distance), y = edit_distance, fill = syllable)) +
+    geom_bar(stat = "summary", fun = "mean") +
+    theme_minimal() +
+    labs(x = "Syllable", y = "Edit Distance")
+    
+  
+```
+
+
+```{r}
+
+vowel_metadata %>% 
+  mutate(is_first_char_same = case_when(is.na(is_first_char_same) ~ FALSE, TRUE ~ is_first_char_same)) %>% 
+  count(syllable, is_first_char_same) %>% 
+  pivot_wider(names_from = is_first_char_same, values_from = n) %>% 
+  rename(Incorrect = `FALSE`, 
+         Correct = `TRUE`) %>% 
+  mutate(Correct = case_when(is.na(Correct) ~ 0, TRUE ~ Correct),
+         ProportionCorrect = Correct / (Incorrect + Correct) ) %>% 
+  rename(Syllable = syllable) %>% 
+    ggplot(aes(x = reorder(Syllable, ProportionCorrect), y = ProportionCorrect, fill = Syllable)) +
+      geom_bar(stat = "identity") +
+      theme_minimal() +
+      labs(x = "Syllable", y = "ProportionCorrect")
+
+```
+
+```{r}
+
+vowel_metadata %>% 
+  mutate(nothing_found = transcription_clean == "" | is.na(transcription_clean)) %>% 
+  count(nothing_found) %>% 
+  pivot_wider(names_from = nothing_found, values_from = n) %>% 
+  rename(NotFound = `FALSE`, 
+         Found = `TRUE`) %>% 
+  summarise(ProportionFound = Found/(Found + NotFound) )
+  
+  
+```
+
+
+
+
+Attempt #2
+
+
+```{r}
+
+# Use prompt parameter
+
+available_syllables <- vowel_metadata$syllable %>% unique()
+
+available_syllables_prompt <- paste0(available_syllables, collapse = ", ")
+
+
+use_data(available_syllables, available_syllables_prompt, overwrite = TRUE)
+
+
+```
+
+```{r}
+
+n <- sample(1:nrow(vowel_metadata), size = 1)
+
+t2 <- get_lyrics(vowel_metadata[[n, "audio_file_path"]],
+                prompt = paste0("Which of the following syllables is contained in the audio file? ", available_syllables_prompt),
+                temperature = 0.1L)
+
+t2
+
+# "E, I, O, Doo, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U, Do, Lah, Woh, U,"
+
+```
+
+
+```{r}
+
+# Sometimes get_lyrics hangs, so we store results as a backup
+results_list2 <- vector("list", nrow(vowel_metadata2))
+
+```
+
+```{r}
+
+
+# Commented out to make sure I don't run it again, but it works
+
+vowel_metadata2 <- vowel_metadata %>%
+  rowwise() %>%
+  mutate(transcription = tryCatch({
+      res <- get_lyrics(audio_file_path, prompt = available_syllables_prompt )
+      # Store result in the results_list
+      results_list[[row_number()]] <<- res
+      res
+    }, error = function(e) {
+      logging::logerror(e)
+      # Handle error, store NA or an error message
+      results_list[[dplyr::row_number()]] <<- NA
+      NA
+    }) ) %>%
+  ungroup()
+
+write_csv(vowel_metadata2, 'vowel_metadata_with_transcription2.csv')
+
+# vowel_metadata[[191, "audio_file_path"]]
+
+
+
+
+```

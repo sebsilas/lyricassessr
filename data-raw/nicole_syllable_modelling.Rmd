@@ -1,0 +1,800 @@
+
+
+```{r warning = FALSE, message = FALSE}
+
+
+devtools::load_all()
+
+library(tidyverse)
+library(readxl)
+library(tidymodels)
+library(bestNormalize)
+library(ggforce)
+library(learntidymodels)
+library(embed)
+library(klaR)
+library(mda)
+library(earth)
+library(DALEXtra)
+library(baguette)
+library(discrim)
+
+
+```
+
+
+First, trim Nicole's audio files
+
+```{r}
+
+is.scalar.na <- function(x) {
+  all(is.na(x)) & length(x) == 1
+}
+
+```
+
+
+```{r}
+
+nicole_audio_files <- list.files("~/lyricassessr/data-raw/NicoleVocals",
+                                full.names = TRUE,
+                                pattern = "\\.WAV$")
+
+```
+
+
+```{r}
+
+# dat should have 3,030 rows like metadata
+
+dat <- tibble(
+  audio_file_with_path = nicole_audio_files,
+  audio_file = basename(audio_file_with_path)
+) %>% 
+  dplyr::rowwise() %>% 
+  dplyr::mutate(pyin = list(pyin::pyin(audio_file_with_path, normalise = TRUE)) ) %>% 
+  ungroup() %>% 
+  unnest(pyin)
+
+save(dat, file = "dat_checkpoint_1.rda")
+
+```
+
+
+
+
+
+
+```{r}
+
+load(file = "dat_checkpoint_1.rda")
+
+
+dat <- dat %>% 
+  filter(!is.na(file_name)) %>% 
+  rowwise() %>% 
+  mutate(trimmed_audio_file = sox_trim(file_name, onset, dur)) %>% 
+  ungroup()
+
+save(dat, file = "dat_checkpoint_2.rda")
+
+
+```
+
+
+
+```{r}
+
+metadata <- read_excel('NicoleVocals/Roadmap Silben.xlsx', 
+                       sheet = "table of individual notes") %>% 
+  rename(id = syllable)
+
+key <- read_excel('NicoleVocals/Roadmap Silben.xlsx', sheet = "key")
+
+pitch_key <- key %>% dplyr::select(pitch, pitchID)
+
+syllable_key <- key %>% dplyr::select(syllable, syllableID)
+
+metadata <- metadata %>% 
+  left_join(pitch_key, by = "pitchID") %>% 
+  left_join(syllable_key, by = "syllableID") %>% 
+  dplyr::select(-description) %>% 
+  rename(sequence_number = `sequence number`,
+         recording_name = `recording name`) %>% 
+  group_by(sequence_number) %>% 
+  mutate(pos_in_sequence = row_number() ) %>% 
+  ungroup()
+
+
+abc_map <- read_csv("NicoleVocals/ABC_to_MIDI_Note_Mapping.csv") %>% 
+  rename(abc_notation = `ABC Notation`,
+         midi_note = `MIDI Note`) 
+
+
+metadata <- metadata %>% 
+  # There are some inconsistencies in notation
+  mutate(pitch = case_when(
+    pitch == "g"   ~ "g",
+    pitch == "g#"  ~ "^g",
+    pitch == "a"   ~ "a",
+    pitch == "a#"  ~ "^a",
+    pitch == "b"   ~ "b",
+    pitch == "c#'" ~ "^c'",
+    pitch == "d#'" ~ "^d'",
+    pitch == "f#'" ~ "^f'",
+    pitch == "g#'" ~ "^g'",
+    pitch == "a#'" ~ "^a'",
+    pitch == "c#''" ~ "^c''",
+    TRUE ~ pitch  # Keep other values unchanged
+  )) %>% 
+  left_join(abc_map, by = c("pitch" = "abc_notation")) %>% 
+  mutate(sci_notation = itembankr::midi_to_sci_notation(midi_note),
+         pitch_class = itembankr::midi_to_pitch_class(midi_note))
+
+```
+
+
+```{r}
+
+load("dat_checkpoint_2.rda")
+
+```
+
+```{r}
+
+dat <- dat %>% 
+  mutate(recording_name = tools::file_path_sans_ext(audio_file)) %>% 
+  rename(transcribed_onset = onset, 
+         transcribed_dur = dur, 
+         transcribed_freq = freq, 
+         transcribed_note = note) %>% 
+  group_by(recording_name) %>% 
+  mutate(pos_in_sequence = row_number()) %>% 
+  ungroup()
+
+```
+
+
+Check the metadata and transcription number of notes match
+
+
+```{r}
+
+count_dat <- dat %>% 
+  count(recording_name)
+
+count_metadata <- metadata %>% 
+  count(recording_name)
+
+count_compare <- count_dat %>% 
+  left_join(count_metadata, by = "recording_name", suffix = c(".dat", ".metadata"))
+
+```
+
+
+```{r}
+
+good_sequences <- count_compare %>% 
+  filter(n.dat == n.metadata) %>% 
+  pull(recording_name)
+  
+```
+
+
+
+```{r}
+
+dat_filtered <- dat %>% 
+  filter(recording_name %in% good_sequences) %>% 
+  left_join(metadata, by = c("recording_name", "pos_in_sequence")) %>% 
+  filter(transcribed_note == midi_note)
+
+save(dat_filtered, file = "dat_filtered.rda")
+
+```
+
+
+```{r}
+
+load(file = "dat_filtered.rda")
+
+
+```
+
+
+
+```{r}
+
+dat_filtered %>% 
+  ggplot(aes(x = syllable, y = midi_note, color = syllable)) +
+    geom_boxplot()
+
+```
+
+
+```{r}
+
+
+# debug(musicassessr::extract_audio_features)
+# undebug(musicassessr::extract_audio_features)
+
+audio_features <- dat_filtered %>% 
+  pull(trimmed_audio_file) %>% 
+  map_dfr(function(f) {
+    tryCatch({
+      
+      suppressMessages(suppressWarnings({
+    musicassessr::extract_audio_features(f)
+        }))
+      
+    }, error = function(err) {
+      logging::logerror(err)
+      tibble::tibble(file_key = NA, V1_mean = NA, V1_sd = NA, V2_mean = NA, 
+    V2_sd = NA, V3_mean = NA, V3_sd = NA, V4_mean = NA, V4_sd = NA, 
+    V5_mean = NA, V5_sd = NA, V6_mean = NA, V6_sd = NA, V7_mean = NA, 
+    V7_sd = NA, V8_mean = NA, V8_sd = NA, V9_mean = NA, V9_sd = NA, 
+    V10_mean = NA, V10_sd = NA, V11_mean = NA, V11_sd = NA, V12_mean = NA, 
+    V12_sd = NA, mean = NA, sd = NA, median = NA, sem = NA, mode = NA, 
+    Q25 = NA, Q75 = NA, IQR = NA, cent = NA, skewness = NA, kurtosis = NA, 
+    sfm = NA, sh = NA, prec = NA, duration = NA, sample_rate = NA, 
+    bit_depth = NA, rms = NA, zero_crossing_rate = NA, shannon_entropy = NA, 
+    acoustic_complexity_index = NA, acoustic_diversity_index = NA, 
+    acoustic_diversity_index2 = NA, acoustic_diversity_index3 = NA, 
+    acoustic_entropy_index = NA, acoustic_evenness_index = NA, 
+    bioacoustic_index = NA, frequency_peaks_number = NA, amplitude_index = NA, 
+    normalized_difference_soundscape_index = NA, spectral_entropy_ndsi = NA, 
+    spectral_entropy_anthrophony = NA, spectral_entropy_biophony = NA, 
+    spectral_entropy2 = NA, temporal_entropy = NA)
+    })
+  }, .progress = TRUE)
+
+
+save(audio_features, file = "audio_features.rda")
+
+```
+
+```{r}
+
+load(file = 'audio_features.rda')
+
+```
+
+```{r}
+
+dat_filtered <- dat_filtered %>% 
+  cbind(audio_features)
+
+```
+
+```{r}
+
+syllable_counts <- dat_filtered %>% 
+  count(syllable)
+
+```
+
+```{r}
+
+syllable_counts_midi_note <- dat_filtered %>% 
+  count(syllable, midi_note)
+
+```
+
+
+```{r}
+
+syllable_counts_midi_note %>% 
+  ggplot(aes(x = syllable, y = n, fill = syllable)) +
+    geom_bar(stat = "identity") +
+    facet_wrap(~midi_note)
+
+```
+
+
+```{r}
+
+syllable_counts %>% 
+  ggplot(aes(x = reorder(syllable, -n), y = n, fill = syllable)) +
+    geom_bar(stat = "identity")
+
+```
+
+
+```{r}
+
+model_dat <- dat_filtered %>% 
+  janitor::remove_empty("cols") %>% 
+  #filter(syllable %in% c("Ah", "Do")) %>% 
+  dplyr::select(syllable, midi_note, 
+                V1_mean:temporal_entropy) %>%  # All preds
+  # select(syllable, midi_note, mean:temporal_entropy) %>% # Non-melfccs
+  # select(syllable, midi_note, V1_mean:V12_sd) %>% # Only melfccs
+  mutate(across(where(is.list), ~ map_dbl(., as.numeric)))  %>% 
+  mutate(syllable = as.factor(syllable))
+
+```
+
+```{r}
+
+set.seed(1601)
+
+split <- 
+  initial_validation_split(model_dat, 
+                           strata = syllable, 
+                           prop = c(0.75, 0.125))
+
+
+# Return data frames:
+train <- training(split)
+test <- testing(split)
+validation <- validation(split)
+
+```
+
+
+```{r}
+
+set.seed(1602)
+# Return an 'rset' object to use with the tune functions:
+val <- validation_set(split)
+val$splits[[1]]
+
+```
+
+```{r}
+
+
+rec <-
+  # Use the training data from the bean_val split object
+  recipe(syllable ~ ., data = train) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_orderNorm(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>% 
+  step_impute_mean(all_numeric_predictors()) # Useful for prediction
+
+```
+
+
+```{r}
+
+rec_trained <- prep(rec)
+
+rec_trained
+
+```
+
+
+```{r}
+
+dark_palette <- c(RColorBrewer::brewer.pal(8, "Dark2"),
+                  RColorBrewer::brewer.pal(7, "Set1"))
+
+# We need a colour set with at least 12 colours for all syllables
+
+plot_validation_results <- function(recipe, dat = validation) {
+  recipe %>%
+    # Estimate any additional steps
+    prep() %>%
+    # Process the data (the validation set by default)
+    bake(new_data = dat) %>%
+    # Create the scatterplot matrix
+    ggplot(aes(x = .panel_x, y = .panel_y, color = syllable, 
+               fill = syllable)) +
+    geom_point(alpha = 0.4, size = 0.5) +
+    geom_autodensity(alpha = .3) +
+    facet_matrix(vars(-syllable), layer.diag = 2) + 
+    scale_color_manual(values = dark_palette) + 
+    scale_fill_manual(values = dark_palette)
+}
+
+```
+
+
+```{r}
+
+rec_trained %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>%
+  plot_validation_results() + 
+  ggtitle("Principal Component Analysis")
+
+```
+
+
+```{r}
+
+
+rec_trained %>%
+  step_pca(all_numeric_predictors(), num_comp = 4) %>% 
+  prep() %>% 
+  plot_top_loadings(component_number <= 4, n = 5) + 
+  scale_fill_brewer(palette = "Paired") +
+  ggtitle("Principal Component Analysis")
+
+```
+
+
+
+```{r}
+
+rec_trained %>%
+  step_pls(all_numeric_predictors(), 
+           outcome = "syllable", num_comp = 4) %>%
+  plot_validation_results() + 
+  ggtitle("Partial Least Squares")
+
+```
+
+
+
+```{r}
+
+rec_trained %>%
+  step_ica(all_numeric_predictors(), num_comp = 4) %>%
+  plot_validation_results() + 
+  ggtitle("Independent Component Analysis")
+
+```
+
+
+```{r}
+
+rec_trained %>%
+  step_umap(all_numeric_predictors(), num_comp = 4) %>%
+  plot_validation_results() +
+  ggtitle("UMAP")
+
+```
+
+
+```{r}
+
+rec_trained %>%
+  step_umap(all_numeric_predictors(), 
+            outcome = "syllable", 
+            num_comp = 4) %>%
+  plot_validation_results() +
+  ggtitle("UMAP (supervised)")
+
+```
+
+
+
+```{r}
+
+mlp_spec <-
+  mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%
+  set_engine('nnet') %>%
+  set_mode('classification')
+
+bagging_spec <-
+  bag_tree() %>%
+  set_engine('rpart') %>%
+  set_mode('classification')
+
+fda_spec <-
+  discrim_flexible(
+    prod_degree = tune()
+  ) %>%
+  set_engine('earth')
+
+rda_spec <-
+  discrim_regularized(frac_common_cov = tune(), frac_identity = tune()) %>%
+  set_engine('klaR')
+
+bayes_spec <-
+  naive_Bayes() %>%
+  set_engine('klaR')
+
+xgb_spec <- boost_tree(
+  trees = 1000,           # Number of trees (boosting iterations)
+  learn_rate = tune()    # Learning rate (tunable)
+) %>% 
+  set_engine("xgboost") %>% # Use XGBoost as the backend
+  set_mode("classification") # 
+
+```
+
+
+```{r}
+
+umap_rec <-
+  rec %>%
+  step_umap(
+    all_numeric_predictors(),
+    outcome = "syllable",
+    num_comp = tune(),
+    neighbors = tune(),
+    min_dist = tune()
+  )
+
+```
+
+
+```{r}
+
+ctrl <- control_grid(parallel_over = "everything", save_pred = TRUE)
+
+res <- 
+  workflow_set(
+    preproc = list(basic = rec, 
+                   umap = umap_rec), 
+    models = list(bayes = bayes_spec, 
+                  fda = fda_spec,
+                  xgb = xgb_spec,
+                  #rda = rda_spec, # This causes issues, for all models..
+                  bag = bagging_spec,
+                  mlp = mlp_spec)
+  ) %>% 
+  workflow_map(
+    verbose = TRUE,
+    seed = 1603,
+    resamples = val,
+    grid = 10,
+    metrics = metric_set(roc_auc),
+    control = ctrl
+  )
+
+
+save(res, file = 'res.rda')
+
+```
+
+
+```{r}
+
+load(file = 'res.rda')
+
+```
+
+
+```{r}
+
+rankings <- 
+  rank_results(res, select_best = TRUE) %>% 
+  mutate(method = map_chr(wflow_id, ~ str_split(.x, "_", simplify = TRUE)[1])) 
+
+tidymodels_prefer()
+filter(rankings, rank <= 5) %>% dplyr::select(rank, mean, model, method)
+
+```
+
+
+```{r}
+
+filter(rankings, rank <= 5)  %>% 
+  ggplot(aes(x = rank, mean, y = mean, 
+             color = model, shape = method)) +
+    geom_point() +
+    labs(y = "ROC AUC")
+
+```
+
+```{r}
+
+xgb_res <- 
+  res %>% 
+  extract_workflow("basic_xgb") %>% 
+  finalize_workflow(
+    res %>% 
+      extract_workflow_set_result("basic_xgb") %>% 
+      select_best(metric = "roc_auc")
+  ) %>% 
+  last_fit(split = split, metrics = metric_set(roc_auc))
+
+xgb_wflow_fit <- extract_workflow(xgb_res)
+
+```
+
+
+
+```{r}
+
+use_data(xgb_wflow_fit, overwrite = TRUE)
+
+xgb_wflow_fit_bundled <- bundle::bundle(xgb_wflow_fit)
+
+use_data(xgb_wflow_fit_bundled, overwrite = TRUE)
+
+
+```
+
+```{r}
+
+collect_metrics(xgb_res)
+
+```
+
+
+```{r, eval = FALSE}
+
+explainer <- 
+  explain_tidymodels(
+    mlp_wflow_fit, 
+    data = train %>% select(-syllable), 
+    y = train$syllable,
+    label = "mlp",
+    verbose = FALSE
+  )
+
+```
+
+
+```{r, eval = FALSE}
+
+vip <- model_parts(explainer)
+plot(vip)
+
+```
+
+
+
+```{r}
+
+predictions <- 
+  lyricassessr::xgb_wflow_fit_bundled %>%
+    bundle::unbundle() %>%
+    predict(new_data = model_dat) %>% 
+    rename(syllable = .pred_class)
+
+
+```
+
+
+```{r}
+
+pred_counts <- predictions %>% 
+  count(syllable)
+
+pred_counts %>% 
+  ggplot(aes(x = reorder(syllable, -n), y = n, fill = syllable)) +
+    geom_bar(stat = "identity")
+
+
+
+```
+
+
+```{r}
+
+counts_joined <- rbind(
+    pred_counts %>% 
+      mutate(Type = "Prediction"),
+    syllable_counts %>% 
+      mutate(Type = "Empirical")
+  )
+
+```
+
+
+```{r}
+
+counts_joined %>% 
+  ggplot(aes(x = reorder(syllable, -n), y = n, group = Type, fill = Type)) +
+    geom_bar(position="dodge", stat = "identity")
+
+```
+
+
+```{r}
+
+gamifyr::scp_down("/srv/shiny-server/syllable-classifier/output/results")
+
+
+```
+
+
+```{r}
+
+rds_files <- list.files('~/Downloads/results', 
+                        full.names = TRUE, 
+                        pattern = "Nicole")
+
+```
+
+
+```{r}
+
+res <- purrr::map_dfr(rds_files, function(f) {
+  readRDS(f)$results$summary
+})
+
+```
+
+
+
+
+```{r}
+
+final_res <- res %>% 
+  group_by(syllable) %>% 
+  summarise(proportion_correct = mean(proportion_correct, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  arrange(desc(proportion_correct))
+ 
+```
+
+
+
+Check if any classes (e.g., So) are underpredicted
+
+
+```{r}
+
+res_predictions <- purrr::map(rds_files, function(f) {
+  readRDS(f)$results %>% 
+    purrr::map(function(y) {
+      as.character(y$syllable_probabilities$SyllablePrediction)
+    })
+}) %>% 
+  unlist(recursive = FALSE) 
+
+res_predictions$summary <- NULL
+res_predictions$summary <- NULL
+res_predictions$summary <- NULL
+
+res_counts <- res_predictions %>% 
+  unlist() %>% 
+  tibble(Syllable = .) %>% 
+  count(Syllable)
+
+
+```
+
+
+```{r}
+
+res_predictions_summary <- res_predictions %>% 
+  enframe() %>% 
+  unnest(value) %>% 
+  rename(target = name,
+         prediction = value)
+
+```
+
+
+```{r}
+
+res_predictions_summary %>% 
+  ggplot(aes(x = prediction, fill = prediction)) +
+  geom_bar(stat = "count") +
+  facet_wrap(~target) +
+  scale_fill_manual(values = dark_palette)
+
+```
+
+
+```{r}
+
+correct <- res_predictions_summary %>% 
+  mutate(correct = target == prediction) %>% 
+  group_by(target) %>% 
+  count(correct) %>% 
+  ungroup() %>% 
+  filter(correct) %>% 
+  mutate(proportion_correct = round(n/30, 2)) %>% 
+  select(-c(correct, n)) %>% 
+  arrange(desc(proportion_correct))
+
+```
+
+
+```{r}
+
+syllable_counts_model_dat <- model_dat %>% 
+  count(syllable)
+
+```
+
+```{r}
+
+joined_for_cors <- syllable_counts_model_dat %>% 
+  left_join(correct, by = c('syllable' = 'target'))
+
+```
+
+```{r}
+
+cor(joined_for_cors$n, joined_for_cors$proportion_correct)
+
+```
