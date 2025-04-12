@@ -41,7 +41,8 @@ extract_syllables <- function(audio_file) {
                        bioacoustic_index = NA, frequency_peaks_number = NA, amplitude_index = NA,
                        normalized_difference_soundscape_index = NA, spectral_entropy_ndsi = NA,
                        spectral_entropy_anthrophony = NA, spectral_entropy_biophony = NA,
-                       spectral_entropy2 = NA, temporal_entropy = NA)
+                       spectral_entropy2 = NA, temporal_entropy = NA, attack_time = NA,
+                       decay_time = NA, sustain_level = NA, release_time = NA, temporal_centroid = NA)
       })
     }, .progress = TRUE)
 
